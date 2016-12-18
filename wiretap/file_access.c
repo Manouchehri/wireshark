@@ -1136,6 +1136,203 @@ success:
 	return wth;
 }
 
+/* Opens a file and prepares a wtap struct.
+   If "do_random" is TRUE, it opens the file twice; the second open
+   allows the application to do random-access I/O without moving
+   the seek offset for sequential I/O, which is used by Wireshark
+   so that it can do sequential I/O to a capture file that's being
+   written to as new packets arrive independently of random I/O done
+   to display protocol trees for packets when they're selected. */
+wtap *
+wtap_open_stream(const char *fname _U_, unsigned int type, int *err,
+                char **err_info, gboolean is_tempfile _U_,
+                const char *filedata, unsigned int size)
+{
+	int	fd;
+	//ws_statb64 statb;
+	wtap	*wth;
+	unsigned int	i;
+	//gboolean use_stdin = TRUE;
+	//gchar *extension;
+	wtap_block_t shb;
+
+	*err = 0;
+	*err_info = NULL;
+
+	char *path = "/tmp/ws-XXXXXX";
+	char buf[255];
+	strcpy(buf, path);
+	fd = mkstemp(buf);
+	if (fd == -1){
+		return NULL;
+	}
+	unlink(buf);
+	
+	if (write(fd, filedata, size) < 0)
+		return NULL;
+
+	lseek(fd, 0, SEEK_SET);
+
+	errno = ENOMEM;
+	wth = (wtap *)g_malloc0(sizeof(wtap));
+
+	wth->fh = file_fdopen(fd);
+
+
+	wth->random_fh = NULL;
+
+	/* initialization */
+	wth->file_encap = WTAP_ENCAP_UNKNOWN;
+	wth->subtype_sequential_close = NULL;
+	wth->subtype_close = NULL;
+	wth->file_tsprec = WTAP_TSPREC_USEC;
+	wth->priv = NULL;
+	wth->wslua_data = NULL;
+	wth->shb_hdrs = g_array_new(FALSE, FALSE, sizeof(wtap_block_t));
+	shb = wtap_block_create(WTAP_BLOCK_NG_SECTION);
+	if (shb)
+		g_array_append_val(wth->shb_hdrs, shb);
+
+	/* Initialize the array containing a list of interfaces. pcapng_open and
+	 * erf_open needs this (and libpcap_open for ERF encapsulation types).
+	 * Always initing it here saves checking for a NULL ptr later. */
+	wth->interface_data = g_array_new(FALSE, FALSE, sizeof(wtap_block_t));
+
+	if (wth->random_fh) {
+		wth->fast_seek = g_ptr_array_new();
+
+		file_set_random_access(wth->fh, FALSE, wth->fast_seek);
+		file_set_random_access(wth->random_fh, TRUE, wth->fast_seek);
+	}
+
+	/* 'type' is 1 greater than the array index */
+	if (type != WTAP_TYPE_AUTO && type <= open_info_arr->len) {
+		int result;
+
+		if (file_seek(wth->fh, 0, SEEK_SET, err) == -1) {
+			/* I/O error - give up */
+			wtap_close(wth);
+			return NULL;
+		}
+
+		/* Set wth with wslua data if any - this is how we pass the data
+		 * to the file reader, kinda like the priv member but not free'd later.
+		 * It's ok for this to copy a NULL.
+		 */
+		wth->wslua_data = open_routines[type - 1].wslua_data;
+
+		result = (*open_routines[type - 1].open_routine)(wth, err, err_info);
+
+		switch (result) {
+			case WTAP_OPEN_ERROR:
+				/* Error - give up */
+				wtap_close(wth);
+				return NULL;
+
+			case WTAP_OPEN_NOT_MINE:
+				/* No error, but not that type of file */
+				goto fail;
+
+			case WTAP_OPEN_MINE:
+				/* We found the file type */
+				goto success;
+		}
+	}
+
+	/* Try all file types that support magic numbers */
+	for (i = 0; i < heuristic_open_routine_idx; i++) {
+		/* Seek back to the beginning of the file; the open routine
+		   for the previous file type may have left the file
+		   position somewhere other than the beginning, and the
+		   open routine for this file type will probably want
+		   to start reading at the beginning.
+
+		   Initialize the data offset while we're at it. */
+		if (file_seek(wth->fh, 0, SEEK_SET, err) == -1) {
+			/* Error - give up */
+			wtap_close(wth);
+			return NULL;
+		}
+
+		/* Set wth with wslua data if any - this is how we pass the data
+		 * to the file reader, kinda like the priv member but not free'd later.
+		 * It's ok for this to copy a NULL.
+		 */
+		wth->wslua_data = open_routines[i].wslua_data;
+
+		switch ((*open_routines[i].open_routine)(wth, err, err_info)) {
+
+		case WTAP_OPEN_ERROR:
+			/* Error - give up */
+			wtap_close(wth);
+			return NULL;
+
+		case WTAP_OPEN_NOT_MINE:
+			/* No error, but not that type of file */
+			break;
+
+		case WTAP_OPEN_MINE:
+			/* We found the file type */
+			goto success;
+		}
+	}
+
+/* For efficiency, only allow libpcap*/
+	switch ( libpcap_open(wth, err, err_info)) {
+
+	case WTAP_OPEN_ERROR:
+		/* Error - give up */
+		wtap_close(wth);
+		return NULL;
+
+	case WTAP_OPEN_NOT_MINE:
+		/* No error, but not that type of file */
+		break;
+
+	case WTAP_OPEN_MINE:
+		/* We found the file type */
+		goto success;
+	}
+
+fail:
+
+	/* Well, it's not one of the types of file we know about. */
+	wtap_close(wth);
+	*err = WTAP_ERR_FILE_UNKNOWN_FORMAT;
+	return NULL;
+
+success:
+	wth->frame_buffer = (struct Buffer *)g_malloc(sizeof(struct Buffer));
+	ws_buffer_init(wth->frame_buffer, 1500);
+
+	if ((wth->file_type_subtype == WTAP_FILE_TYPE_SUBTYPE_PCAP) ||
+		(wth->file_type_subtype == WTAP_FILE_TYPE_SUBTYPE_PCAP_NSEC)) {
+
+		wtap_block_t descr = wtap_block_create(WTAP_BLOCK_IF_DESCR);
+		wtapng_if_descr_mandatory_t* descr_mand = (wtapng_if_descr_mandatory_t*)wtap_block_get_mandatory_data(descr);
+
+		descr_mand->wtap_encap = wth->file_encap;
+		if (wth->file_type_subtype == WTAP_FILE_TYPE_SUBTYPE_PCAP_NSEC) {
+			descr_mand->time_units_per_second = 1000000000; /* nanosecond resolution */
+			wtap_block_add_uint8_option(descr, OPT_IDB_TSRESOL, 9);
+			descr_mand->tsprecision = WTAP_TSPREC_NSEC;
+		} else {
+			descr_mand->time_units_per_second = 1000000; /* default microsecond resolution */
+			/* No need to add an option, this is the default */
+			descr_mand->tsprecision = WTAP_TSPREC_USEC;
+		}
+		descr_mand->link_type = wtap_wtap_encap_to_pcap_encap(wth->file_encap);
+		descr_mand->snap_len = wth->snapshot_length;
+
+		descr_mand->num_stat_entries = 0;          /* Number of ISB:s */
+		descr_mand->interface_statistics = NULL;
+		g_array_append_val(wth->interface_data, descr);
+
+	}
+	return wth;
+}
+
+
 /*
  * Given the pathname of the file we just closed with wtap_fdclose(), attempt
  * to reopen that file and assign the new file descriptor(s) to the sequential

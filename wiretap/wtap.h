@@ -1529,6 +1529,12 @@ WS_DLL_PUBLIC
 struct wtap* wtap_open_offline(const char *filename, unsigned int type, int *err,
     gchar **err_info, gboolean do_random);
 
+
+WS_DLL_PUBLIC
+struct wtap* wtap_open_stream(const char *filename, unsigned int type, int *err,
+    gchar **err_info, gboolean do_random, const char *filedata, unsigned int size);
+
+
 /**
  * If we were compiled with zlib and we're at EOF, unset EOF so that
  * wtap_read/gzread has a chance to succeed. This is necessary if

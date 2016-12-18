@@ -47,6 +47,11 @@ typedef gboolean (*subtype_seek_read_func)(struct wtap*, gint64,
 struct wtap {
     FILE_T                      fh;
     FILE_T                      random_fh;              /**< Secondary FILE_T for random access */
+
+    char                        *data;                  /* Store the raw binary data */
+    guint                       data_length;            /* Store the size of the binary data*/
+
+
     int                         file_type_subtype;
     guint                       snapshot_length;
     struct Buffer               *frame_buffer;

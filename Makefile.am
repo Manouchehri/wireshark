@@ -506,7 +506,6 @@ endif
 
 tshark_SOURCES = \
 	$(SHARK_COMMON_SRC)	\
-	capture_opts.c		\
 	filter_files.c		\
 	tshark.c		\
 	ws_version_info.c
@@ -517,7 +516,6 @@ tshark_LDFLAGS = $(AM_LDFLAGS) $(EXTRALINKFLAGS)
 
 # Libraries and plugin flags with which to link tshark.
 tshark_LDADD = \
-	capchild/libcapchild.a		\
 	caputils/libcaputils.a		\
 	ui/cli/libcliui.a		\
 	ui/libui.a			\
